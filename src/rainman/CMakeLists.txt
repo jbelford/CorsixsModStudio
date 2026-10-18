@@ -164,6 +164,7 @@ if(MSVC)
         /W3
         /wd4251  # DLL interface warning (keeping for compatibility)
         /wd4996  # Deprecated CRT functions
+        -fwide-exec-charset=UTF-16
     )
 endif()
 
