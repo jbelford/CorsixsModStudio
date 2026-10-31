@@ -562,45 +562,23 @@ void ConstructFrame::LaunchMod(wxCommandEvent &event)
 void ConstructFrame::LaunchWarnings(wxCommandEvent &event)
 {
     UNUSED(event);
-    wxString sCommand, sFolder;
+    wxFileName warningsLog;
     if (GetModule() && GetModuleService().GetModuleType() != CModuleFile::MT_DawnOfWar)
     {
-#ifdef _WIN32
-        wchar_t sDocumentsFolder[MAX_PATH];
-        SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, sDocumentsFolder);
-        sCommand = wxT("\"");
-        sCommand.Append(sDocumentsFolder);
-        sCommand.Append(wxT("\\My Games\\Company of Heroes\\warnings.log\""));
-#else
-        sCommand = wxFileName(wxStandardPaths::Get().GetDocumentsDir(),
-                              wxT("My Games/Company of Heroes/warnings.log"))
-                       .GetFullPath();
-#endif
+        warningsLog = wxFileName(wxStandardPaths::Get().GetDocumentsDir(), wxT("warnings.log"));
+        warningsLog.AppendDir(wxT("My Games"));
+        warningsLog.AppendDir(wxT("Company of Heroes"));
     }
     else
     {
-        sFolder = m_moduleManager.GetModuleFile().BeforeLast('\\');
-        if (!sFolder.EndsWith(wxT("\\")))
-        {
-            sFolder.Append(wxT("\\"));
-        }
-        sCommand = wxT("\"");
-        sCommand.Append(sFolder);
-        sCommand.Append(wxT("warnings.log\""));
+        warningsLog = wxFileName(m_moduleManager.GetModuleFile());
+        warningsLog.SetFullName(wxT("warnings.log"));
     }
 
-#ifdef _WIN32
-    wchar_t sWinFolder[MAX_PATH];
-    SHGetFolderPath(NULL, CSIDL_SYSTEM, NULL, SHGFP_TYPE_CURRENT, sWinFolder);
-    wxString sNotepad = sWinFolder;
-    sNotepad.Append(wxT("\\notepad.exe"));
-
-    if (!LaunchExecutable(sNotepad, sCommand, sFolder))
-#else
-    if (!wxLaunchDefaultApplication(sCommand))
-#endif
+    const wxString sLogPath = warningsLog.GetFullPath();
+    if (!wxLaunchDefaultApplication(sLogPath))
     {
-        ThemeColours::ShowMessageBox(wxT("Failed to open warnings log: ") + sCommand, wxT("Error"),
+        ThemeColours::ShowMessageBox(wxT("Failed to open warnings log: ") + sLogPath, wxT("Error"),
                                      wxOK | wxICON_ERROR, this);
     }
 }
@@ -699,7 +677,6 @@ size_t ConstructFrame::GetToolCount() { return m_toolRegistry.GetCount(); }
 ConstructFrame::ITool *ConstructFrame::GetTool(size_t i) { return m_toolRegistry.Get(i); }
 
 void ConstructFrame::DoTool(wxString sName) { m_toolRegistry.DoTool(sName); }
-void ConstructFrame::DoToolIdx(int index) { m_toolRegistry.DoToolIdx(index); }
 
 ConstructFrame::~ConstructFrame()
 {

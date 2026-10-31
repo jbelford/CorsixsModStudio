@@ -460,7 +460,7 @@ frmFiles::~frmFiles()
     }
 }
 
-void frmFiles::LaunchTool(wxListEvent &event) { TheConstruct->DoToolIdx(event.GetIndex()); }
+void frmFiles::LaunchTool(wxListEvent &event) { TheConstruct->GetToolRegistry().LaunchTool(static_cast<size_t>(event.GetIndex())); }
 
 void frmFiles::OnNodeTooltip(wxTreeEvent &event)
 {
