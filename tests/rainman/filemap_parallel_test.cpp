@@ -24,10 +24,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <process.h>
+#include "../common/TestProcessId.h"
 #include <string>
 #include <thread>
 #include <vector>
+#include <algorithm>
 
 class FileMapParallelTest : public ::testing::Test
 {
@@ -37,7 +38,7 @@ class FileMapParallelTest : public ::testing::Test
     void SetUp() override
     {
         tempDir = std::filesystem::temp_directory_path() /
-                  ("filemap_parallel_test_" + std::to_string(_getpid()) + "_" +
+                  ("filemap_parallel_test_" + std::to_string(GetTestProcessId()) + "_" +
                    std::to_string(reinterpret_cast<uintptr_t>(this)));
         std::filesystem::create_directories(tempDir);
     }
@@ -100,8 +101,8 @@ TEST_F(FileMapParallelTest, RegisterSourceThenMapIteratorSequential)
     fsStore.VInit();
 
     // Create a small directory to iterate
-    createFile("testfolder\\file1.txt", "content1");
-    createFile("testfolder\\file2.txt", "content2");
+    createFile("testfolder/file1.txt", "content1");
+    createFile("testfolder/file2.txt", "content2");
 
     // Register two sources in parallel
     auto f1 = std::async(std::launch::async, [&]() {

@@ -82,18 +82,13 @@ TEST_F(UcsFileTest, ReplaceStringTransfersOwnership) {
 TEST_F(UcsFileTest, LoadUcsFromMemory) {
     ucs.New();
 
-    // Build a minimal UCS file in memory:
-    // BOM (0xFEFF) + "1\tHello\r\n"
+    // Build a minimal UTF-16LE UCS file in memory: BOM + "1\tHello\r\n"
     CMemoryStore store;
     store.VInit();
     auto* out = CMemoryStore::OpenOutputStreamExt();
 
-    unsigned short bom = 0xFEFF;
-    out->VWrite(1, sizeof(unsigned short), &bom);
-
-    // Write line: L"1\tHello\r\n"
-    const wchar_t line[] = L"1\tHello\r\n";
-    out->VWrite(static_cast<unsigned long>(wcslen(line)), sizeof(wchar_t), line);
+    const uint16_t data[] = {0xFEFF, '1', '\t', 'H', 'e', 'l', 'l', 'o', '\r', '\n'};
+    out->VWrite(sizeof(data) / sizeof(data[0]), sizeof(uint16_t), data);
 
     auto* inStream = CMemoryStore::OpenStreamExt(
         const_cast<char*>(out->GetData()), out->GetDataLength(), false);
@@ -109,6 +104,50 @@ TEST_F(UcsFileTest, LoadUcsFromMemory) {
     delete out;
 }
 
+TEST_F(UcsFileTest, LoadKeepsNoncharactersAndLoneSurrogates)
+{
+    CMemoryStore store;
+    store.VInit();
+    auto *out = CMemoryStore::OpenOutputStreamExt();
+
+    const uint16_t data[] = {0xFEFF, '1', '\t', 'O', 'K', '\n',
+                             '2',    '\t', 'A', 0xFFFF, 'B', '\n',
+                             '3',    '\t', 'C', 0xD800, 'D', '\n',
+                             '4',    '\t', 0xFDD0, '\n',
+                             '5',    '\t', 0xD83D, 0xDE00, '\n'};
+    out->VWrite(sizeof(data) / sizeof(data[0]), sizeof(uint16_t), data);
+
+    auto *inStream = CMemoryStore::OpenStreamExt(
+        const_cast<char *>(out->GetData()), out->GetDataLength(), false);
+    CUcsFile loaded;
+    loaded.Load(inStream);
+
+    EXPECT_STREQ(loaded.ResolveStringID(1), L"OK");
+
+    const wchar_t expectedNoncharacter[] = {L'A', static_cast<wchar_t>(0xFFFF), L'B', 0};
+    EXPECT_STREQ(loaded.ResolveStringID(2), expectedNoncharacter);
+
+    const wchar_t expectedLoneSurrogate[] = {L'C', static_cast<wchar_t>(0xD800), L'D', 0};
+    EXPECT_STREQ(loaded.ResolveStringID(3), expectedLoneSurrogate);
+
+    const wchar_t expectedFdd0[] = {static_cast<wchar_t>(0xFDD0), 0};
+    EXPECT_STREQ(loaded.ResolveStringID(4), expectedFdd0);
+
+    const wchar_t *pSupplementaryCharacter = loaded.ResolveStringID(5);
+    ASSERT_NE(pSupplementaryCharacter, nullptr);
+    if constexpr (sizeof(wchar_t) > 2)
+    {
+        EXPECT_STREQ(pSupplementaryCharacter, L"\U0001F600");
+    }
+    else
+    {
+        const wchar_t expected[] = {static_cast<wchar_t>(0xD83D), static_cast<wchar_t>(0xDE00), 0};
+        EXPECT_STREQ(pSupplementaryCharacter, expected);
+    }
+
+    delete inStream;
+    delete out;
+}
 TEST_F(UcsFileTest, LoadInvalidHeaderThrows) {
     CMemoryStore store;
     store.VInit();

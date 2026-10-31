@@ -19,7 +19,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "rainman/formats/CRgdFile.h"
 #include "rainman/io/CMemoryStore.h"
+#include <climits>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <type_traits>
+#include <vector>
 #include <zlib.h>
 #include <algorithm>
 #include "rainman/core/memdebug.h"
@@ -30,6 +35,93 @@ extern "C"
 };
 #include "rainman/lua/luax.h"
 #include "rainman/core/Exception.h"
+
+static bool IsInvalidUnicodeCodepoint(uint32_t iCodepoint)
+{
+    return iCodepoint > 0x10FFFF || (iCodepoint >= 0xD800 && iCodepoint <= 0xDFFF) ||
+           (iCodepoint >= 0xFDD0 && iCodepoint <= 0xFDEF) || (iCodepoint & 0xFFFE) == 0xFFFE;
+}
+
+static std::wstring DecodeUtf16(const uint16_t *pCodeUnits, size_t iLength)
+{
+    std::wstring sResult;
+    sResult.reserve(iLength);
+    for (size_t i = 0; i < iLength; ++i)
+    {
+        uint32_t iCodepoint = pCodeUnits[i];
+        if (iCodepoint >= 0xD800 && iCodepoint <= 0xDBFF)
+        {
+            if (++i >= iLength || pCodeUnits[i] < 0xDC00 || pCodeUnits[i] > 0xDFFF)
+                throw CRainmanException(nullptr, __FILE__, __LINE__, "Invalid UTF-16 surrogate pair in RGD string");
+            iCodepoint = 0x10000 + ((iCodepoint - 0xD800) << 10) + (pCodeUnits[i] - 0xDC00);
+        }
+        else if (iCodepoint >= 0xDC00 && iCodepoint <= 0xDFFF)
+        {
+            throw CRainmanException(nullptr, __FILE__, __LINE__, "Unpaired UTF-16 low surrogate in RGD string");
+        }
+
+        if (IsInvalidUnicodeCodepoint(iCodepoint))
+            throw CRainmanException(nullptr, __FILE__, __LINE__, "Invalid Unicode character in RGD string");
+
+#if WCHAR_MAX <= 0xFFFF
+        if (iCodepoint > 0xFFFF)
+        {
+            iCodepoint -= 0x10000;
+            sResult.push_back(static_cast<wchar_t>(0xD800 + (iCodepoint >> 10)));
+            sResult.push_back(static_cast<wchar_t>(0xDC00 + (iCodepoint & 0x3FF)));
+        }
+        else
+#endif
+        {
+            sResult.push_back(static_cast<wchar_t>(iCodepoint));
+        }
+    }
+    return sResult;
+}
+
+static std::vector<uint16_t> EncodeUtf16(const wchar_t *sString)
+{
+    std::vector<uint16_t> tCodeUnits;
+    for (size_t i = 0; sString[i] != 0; ++i)
+    {
+        if constexpr (std::is_signed_v<wchar_t>)
+        {
+            if (sString[i] < 0)
+                throw CRainmanException(nullptr, __FILE__, __LINE__, "Invalid negative Unicode character in RGD string");
+        }
+
+        uint32_t iCodepoint = static_cast<uint32_t>(sString[i]);
+        if constexpr (sizeof(wchar_t) == sizeof(uint16_t))
+        {
+            if (iCodepoint >= 0xD800 && iCodepoint <= 0xDBFF)
+            {
+                const uint32_t iLowSurrogate = static_cast<uint32_t>(sString[++i]);
+                if (iLowSurrogate < 0xDC00 || iLowSurrogate > 0xDFFF)
+                    throw CRainmanException(nullptr, __FILE__, __LINE__, "Invalid UTF-16 surrogate pair in RGD string");
+                iCodepoint = 0x10000 + ((iCodepoint - 0xD800) << 10) + (iLowSurrogate - 0xDC00);
+            }
+            else if (iCodepoint >= 0xDC00 && iCodepoint <= 0xDFFF)
+            {
+                throw CRainmanException(nullptr, __FILE__, __LINE__, "Unpaired UTF-16 low surrogate in RGD string");
+            }
+        }
+
+        if (IsInvalidUnicodeCodepoint(iCodepoint))
+            throw CRainmanException(nullptr, __FILE__, __LINE__, "Invalid Unicode character in RGD string");
+
+        if (iCodepoint <= 0xFFFF)
+        {
+            tCodeUnits.push_back(static_cast<uint16_t>(iCodepoint));
+        }
+        else
+        {
+            iCodepoint -= 0x10000;
+            tCodeUnits.push_back(static_cast<uint16_t>(0xD800 + (iCodepoint >> 10)));
+            tCodeUnits.push_back(static_cast<uint16_t>(0xDC00 + (iCodepoint & 0x3FF)));
+        }
+    }
+    return tCodeUnits;
+}
 
 struct tLuaTableProtector
 {
@@ -548,7 +640,13 @@ void CRgdFile::_LoadLua(lua_State *L, _RgdEntry *pDest, bool bSkipThisLevelRef)
 
 void CRgdFile::Load(IFileStore::IStream *pStream)
 {
-    RAINMAN_LOG_INFO("CRgdFile::Load() — parsing RGD from stream");
+    Load(pStream, nullptr);
+}
+
+void CRgdFile::Load(IFileStore::IStream *pStream, const char *sFilePath)
+{
+    RAINMAN_LOG_INFO("CRgdFile::Load() — parsing RGD from stream '{}'",
+                     sFilePath ? sFilePath : "(unknown)");
     // Load RGD Header
     _Clean();
     if (pStream == nullptr)
@@ -587,15 +685,40 @@ void CRgdFile::Load(IFileStore::IStream *pStream)
     // Attempt to read chunks
     char sChunkHeadTempBuffer[9] = {};
 
-    while (1)
+    while (true)
     {
+        long iChunkStart, iStreamEnd;
+        try
+        {
+            iChunkStart = pStream->VTell();
+            pStream->VSeek(0, IFileStore::IStream::SL_End);
+            iStreamEnd = pStream->VTell();
+            pStream->VSeek(iChunkStart, IFileStore::IStream::SL_Root);
+        }
+        catch (const CRainmanException &e)
+        {
+            _Clean();
+            throw CRainmanException(e, __FILE__, __LINE__, "Cannot determine RGD chunk boundaries");
+        }
+
+        if (iChunkStart == iStreamEnd)
+        {
+            break;
+        }
+        if (iChunkStart < 0 || iChunkStart > iStreamEnd || iStreamEnd - iChunkStart < 8)
+        {
+            _Clean();
+            throw CRainmanException(__FILE__, __LINE__, "Incomplete RGD chunk header");
+        }
+
         try
         {
             pStream->VRead(8, 1, sChunkHeadTempBuffer);
         }
         catch (const CRainmanException &e)
         {
-            break;
+            _Clean();
+            throw CRainmanException(e, __FILE__, __LINE__, "Input error");
         }
         auto pChunkOwner = std::make_unique<_RgdChunk>();
         _RgdChunk *pChunk = pChunkOwner.get();
@@ -993,13 +1116,14 @@ void CRgdFile::_WriteRawRgdData(IFileStore::IOutputStream *pStream, _RgdEntry *p
         }
         case DT_WString:
         {
-            size_t iL = wcslen((**itr).Data.ws) + 1;
+            auto tCodeUnits = EncodeUtf16((**itr).Data.ws);
+            tCodeUnits.push_back(0);
             try
             {
-                pStream->VWrite(iL, 2, (**itr).Data.ws);
+                pStream->VWrite(static_cast<unsigned long>(tCodeUnits.size()), sizeof(uint16_t), tCodeUnits.data());
             }
             CATCH_THROW("Output error")
-            iDataLen += (iL << 1);
+            iDataLen += static_cast<long>(tCodeUnits.size() * sizeof(uint16_t));
             break;
         }
         case DT_Table:
@@ -1028,7 +1152,8 @@ void CRgdFile::_WriteRawRgdData(IFileStore::IOutputStream *pStream, _RgdEntry *p
 
 void CRgdFile::_ProcessRawRgdData(IFileStore::IStream *pStream, _RgdEntry *pDestination)
 {
-    long iKeyCount, iDataOffset;
+    uint32_t iKeyCount;
+    long iDataOffset;
     try
     {
         pStream->VRead(1, sizeof(uint32_t), &iKeyCount);
@@ -1039,7 +1164,7 @@ void CRgdFile::_ProcessRawRgdData(IFileStore::IStream *pStream, _RgdEntry *pDest
     while (iKeyCount)
     {
         _RgdEntry *pEntry = CHECK_MEM(new _RgdEntry);
-        long iOffset;
+        uint32_t iOffset;
         pDestination->Data.t->push_back(pEntry);
 
         pEntry->iHash = 0;
@@ -1049,13 +1174,17 @@ void CRgdFile::_ProcessRawRgdData(IFileStore::IStream *pStream, _RgdEntry *pDest
 
         try
         {
-            pStream->VRead(1, sizeof(uint32_t), &pEntry->iHash);
+            uint32_t iHash;
+            pStream->VRead(1, sizeof(iHash), &iHash);
+            pEntry->iHash = iHash;
         }
         CATCH_THROW("Input error")
 
         try
         {
-            pStream->VRead(1, sizeof(uint32_t), &pEntry->Type);
+            uint32_t iType;
+            pStream->VRead(1, sizeof(iType), &iType);
+            pEntry->Type = static_cast<eDataTypes>(iType);
         }
         CATCH_THROW("Input error")
 
@@ -1121,7 +1250,9 @@ void CRgdFile::_ProcessRawRgdData(IFileStore::IStream *pStream, _RgdEntry *pDest
         case DT_Integer:
             try
             {
-                pStream->VRead(1, sizeof(uint32_t), &pEntry->Data.i);
+                uint32_t iValue;
+                pStream->VRead(1, sizeof(iValue), &iValue);
+                pEntry->Data.i = iValue;
             }
             CATCH_THROW("Input error")
             break;
@@ -1176,40 +1307,25 @@ void CRgdFile::_ProcessRawRgdData(IFileStore::IStream *pStream, _RgdEntry *pDest
         break;
         case DT_WString:
         {
-            unsigned long iStrLen = 8, iLen = 0;
-            auto *sTmp = new wchar_t[iStrLen];
-            if (sTmp == nullptr)
+            std::vector<uint16_t> tCodeUnits;
+            try
             {
-                QUICK_THROW("Memory error")
+                for (;;)
+                {
+                    uint16_t iCodeUnit;
+                    pStream->VRead(1, sizeof(iCodeUnit), &iCodeUnit);
+                    if (iCodeUnit == 0)
+                        break;
+                    tCodeUnits.push_back(iCodeUnit);
+                }
             }
-            do
-            {
-                try
-                {
-                    pStream->VRead(1, sizeof(uint16_t), sTmp + iLen);
-                }
-                catch (const CRainmanException &e)
-                {
-                    delete[] sTmp;
-                    throw CRainmanException(e, __FILE__, __LINE__, "Input error");
-                }
-                ++iLen;
-                if (iLen == iStrLen)
-                {
-                    iStrLen <<= 1;
-                    auto *sNew = new wchar_t[iStrLen];
-                    if (sNew == nullptr)
-                    {
-                        delete[] sTmp;
-                        QUICK_THROW("Memory error")
-                    }
-                    memcpy(sNew, sTmp, iLen * sizeof(wchar_t));
-                    delete[] sTmp;
-                    sTmp = sNew;
-                }
-            } while (sTmp[iLen - 1]);
+            CATCH_THROW("Input error")
 
-            pEntry->Data.ws = sTmp;
+            const std::wstring sDecoded = DecodeUtf16(tCodeUnits.data(), tCodeUnits.size());
+            auto sWideString = std::make_unique<wchar_t[]>(sDecoded.size() + 1);
+            std::copy(sDecoded.begin(), sDecoded.end(), sWideString.get());
+            sWideString[sDecoded.size()] = 0;
+            pEntry->Data.ws = sWideString.release();
             if (pEntry->iHash == 0x49D60FAE)
             {
                 pDestination->pExt = pEntry;
@@ -1941,7 +2057,7 @@ good:
 void CRgdFile::_ReadRainmanRgdData(IFileStore::IStream *pInput, CRgdFile::_RgdEntry *pDestination, bool bSetName)
 {
     // Name
-    unsigned long iHash, iNameLen;
+    uint32_t iHash, iNameLen;
     pInput->VRead(1, sizeof(uint32_t), &iHash);
     pInput->VRead(1, sizeof(uint32_t), &iNameLen);
     if (bSetName)
@@ -1996,6 +2112,7 @@ void CRgdFile::_ReadRainmanRgdData(IFileStore::IStream *pInput, CRgdFile::_RgdEn
         break;
     case DT_WString:
         delete[] pDestination->Data.ws;
+        pDestination->Data.ws = nullptr;
         break;
     case DT_Table:
     case sk_TableInt:
@@ -2007,7 +2124,7 @@ void CRgdFile::_ReadRainmanRgdData(IFileStore::IStream *pInput, CRgdFile::_RgdEn
     char cDataType;
     pInput->VRead(1, 1, &cDataType);
     pDestination->Type = (eDataTypes)cDataType;
-    unsigned long iDataLen;
+    uint32_t iDataLen;
     pInput->VRead(1, sizeof(uint32_t), &iDataLen);
 
     switch (pDestination->Type)
@@ -2035,7 +2152,9 @@ void CRgdFile::_ReadRainmanRgdData(IFileStore::IStream *pInput, CRgdFile::_RgdEn
     {
         if (iDataLen == sizeof(uint32_t))
         {
-            pInput->VRead(1, sizeof(uint32_t), &pDestination->Data.i);
+            uint32_t iValue;
+            pInput->VRead(1, sizeof(iValue), &iValue);
+            pDestination->Data.i = iValue;
         }
         else if (iDataLen == sizeof(short))
         {
@@ -2072,9 +2191,14 @@ void CRgdFile::_ReadRainmanRgdData(IFileStore::IStream *pInput, CRgdFile::_RgdEn
     }
     case DT_WString:
     {
-        pDestination->Data.ws = new wchar_t[iDataLen + 1];
-        pInput->VRead(iDataLen, 2, pDestination->Data.ws);
-        pDestination->Data.ws[iDataLen] = 0;
+        std::vector<uint16_t> tCodeUnits(iDataLen);
+        if (iDataLen != 0)
+            pInput->VRead(iDataLen, sizeof(uint16_t), tCodeUnits.data());
+        const std::wstring sDecoded = DecodeUtf16(tCodeUnits.data(), tCodeUnits.size());
+        auto sWideString = std::make_unique<wchar_t[]>(sDecoded.size() + 1);
+        std::copy(sDecoded.begin(), sDecoded.end(), sWideString.get());
+        sWideString[sDecoded.size()] = 0;
+        pDestination->Data.ws = sWideString.release();
         break;
     }
     case DT_Table:
@@ -2150,13 +2274,16 @@ void CRgdFile::_WriteRainmanRgdData(CMemoryStore::COutStream *pOutput, CRgdFile:
         break;
 
     case DT_WString:
-        iL = pSource->Data.ws ? wcslen(pSource->Data.ws) : 0;
+    {
+        const auto tCodeUnits = pSource->Data.ws ? EncodeUtf16(pSource->Data.ws) : std::vector<uint16_t>{};
+        iL = static_cast<uint32_t>(tCodeUnits.size());
         pOutput->VWrite(1, sizeof(uint32_t), &iL);
         if (iL)
         {
-            pOutput->VWrite(iL, 2, pSource->Data.ws);
+            pOutput->VWrite(static_cast<unsigned long>(iL), sizeof(uint16_t), tCodeUnits.data());
         }
         break;
+    }
 
     case DT_Table:
     case sk_TableInt:
