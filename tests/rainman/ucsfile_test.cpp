@@ -104,16 +104,16 @@ TEST_F(UcsFileTest, LoadUcsFromMemory) {
     delete out;
 }
 
-TEST_F(UcsFileTest, LoadSkipsInvalidUnicodeEntries)
+TEST_F(UcsFileTest, LoadKeepsNoncharactersAndLoneSurrogates)
 {
     CMemoryStore store;
     store.VInit();
     auto *out = CMemoryStore::OpenOutputStreamExt();
 
     const uint16_t data[] = {0xFEFF, '1', '\t', 'O', 'K', '\n',
-                             '2',    '\t', 0xFFFF, '\n',
-                             '3',    '\t', 0xD800, '\n',
-                             '4',    '\t', 'Y', 'E', 'S', '\n',
+                             '2',    '\t', 'A', 0xFFFF, 'B', '\n',
+                             '3',    '\t', 'C', 0xD800, 'D', '\n',
+                             '4',    '\t', 0xFDD0, '\n',
                              '5',    '\t', 0xD83D, 0xDE00, '\n'};
     out->VWrite(sizeof(data) / sizeof(data[0]), sizeof(uint16_t), data);
 
@@ -123,9 +123,16 @@ TEST_F(UcsFileTest, LoadSkipsInvalidUnicodeEntries)
     loaded.Load(inStream);
 
     EXPECT_STREQ(loaded.ResolveStringID(1), L"OK");
-    EXPECT_EQ(loaded.ResolveStringID(2), nullptr);
-    EXPECT_EQ(loaded.ResolveStringID(3), nullptr);
-    EXPECT_STREQ(loaded.ResolveStringID(4), L"YES");
+
+    const wchar_t expectedNoncharacter[] = {L'A', static_cast<wchar_t>(0xFFFF), L'B', 0};
+    EXPECT_STREQ(loaded.ResolveStringID(2), expectedNoncharacter);
+
+    const wchar_t expectedLoneSurrogate[] = {L'C', static_cast<wchar_t>(0xD800), L'D', 0};
+    EXPECT_STREQ(loaded.ResolveStringID(3), expectedLoneSurrogate);
+
+    const wchar_t expectedFdd0[] = {static_cast<wchar_t>(0xFDD0), 0};
+    EXPECT_STREQ(loaded.ResolveStringID(4), expectedFdd0);
+
     const wchar_t *pSupplementaryCharacter = loaded.ResolveStringID(5);
     ASSERT_NE(pSupplementaryCharacter, nullptr);
     if constexpr (sizeof(wchar_t) > 2)
@@ -141,7 +148,6 @@ TEST_F(UcsFileTest, LoadSkipsInvalidUnicodeEntries)
     delete inStream;
     delete out;
 }
-
 TEST_F(UcsFileTest, LoadInvalidHeaderThrows) {
     CMemoryStore store;
     store.VInit();

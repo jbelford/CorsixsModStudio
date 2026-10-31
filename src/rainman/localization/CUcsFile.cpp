@@ -21,7 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include "rainman/core/memdebug.h"
 #include "rainman/core/Exception.h"
 #include "rainman/core/RainmanLog.h"
-#include <climits>
+#include <cwchar>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -58,45 +58,26 @@ bool CUcsFile::IsDollarString(const wchar_t *s)
     return true;
 }
 
-static bool IsUnicodeNoncharacter(uint32_t iCodepoint)
+// Copies UTF-16 code units into wchar_t. Where wchar_t is 32 bits, valid surrogate pairs are combined into one
+// code point; all other values (including lone surrogates and noncharacters) are copied unchanged.
+static size_t CopyUcsString(const uint16_t *pSource, size_t iLength, wchar_t *pDestination)
 {
-    return (iCodepoint >= 0xFDD0 && iCodepoint <= 0xFDEF) || (iCodepoint & 0xFFFE) == 0xFFFE;
-}
-
-static bool DecodeUcsString(const uint16_t *pSource, size_t iLength, wchar_t *pDestination, size_t &iDecodedLength)
-{
-    iDecodedLength = 0;
+    size_t iDecodedLength = 0;
     for (size_t i = 0; i < iLength; ++i)
     {
-        uint32_t iCodepoint = pSource[i];
-        if (iCodepoint >= 0xD800 && iCodepoint <= 0xDBFF)
+#if WCHAR_MAX > 0xFFFF
+        if (pSource[i] >= 0xD800 && pSource[i] <= 0xDBFF && i + 1 < iLength && pSource[i + 1] >= 0xDC00 &&
+            pSource[i + 1] <= 0xDFFF)
         {
-            if (i + 1 >= iLength || pSource[i + 1] < 0xDC00 || pSource[i + 1] > 0xDFFF)
-                return false;
-            iCodepoint = 0x10000 + ((iCodepoint - 0xD800) << 10) + (pSource[++i] - 0xDC00);
+            pDestination[iDecodedLength++] =
+                static_cast<wchar_t>(0x10000 + ((pSource[i] - 0xD800) << 10) + (pSource[i + 1] - 0xDC00));
+            ++i;
+            continue;
         }
-        else if (iCodepoint >= 0xDC00 && iCodepoint <= 0xDFFF)
-        {
-            return false;
-        }
-
-        if (IsUnicodeNoncharacter(iCodepoint))
-            return false;
-
-#if WCHAR_MAX <= 0xFFFF
-        if (iCodepoint > 0xFFFF)
-        {
-            iCodepoint -= 0x10000;
-            pDestination[iDecodedLength++] = static_cast<wchar_t>(0xD800 + (iCodepoint >> 10));
-            pDestination[iDecodedLength++] = static_cast<wchar_t>(0xDC00 + (iCodepoint & 0x3FF));
-        }
-        else
 #endif
-        {
-            pDestination[iDecodedLength++] = static_cast<wchar_t>(iCodepoint);
-        }
+        pDestination[iDecodedLength++] = static_cast<wchar_t>(pSource[i]);
     }
-    return true;
+    return iDecodedLength;
 }
 
 void CUcsFile::New()
@@ -385,10 +366,7 @@ void CUcsFile::Load(IFileStore::IStream *pStream)
         // Copy the string value
         auto iLen = static_cast<size_t>(pLineEnd - p);
         std::unique_ptr<wchar_t[]> sString(new wchar_t[iLen + 1]);
-        size_t iDecodedLength;
-        if (!DecodeUcsString(p, iLen, sString.get(), iDecodedLength))
-            continue;
-        sString[iDecodedLength] = 0;
+        sString[CopyUcsString(p, iLen, sString.get())] = 0;
 
         m_map.Add(iNumber, std::move(sString));
     }
