@@ -139,7 +139,7 @@ TEST_F(CDeArchiveToolTest, FindsBurnAndArchiveConfigOutsideVirtualGameData)
 
 TEST_F(CDeArchiveToolTest, FindsNestedProjectFiles)
 {
-    const wxString sBurnFolder = JoinPath(m_sRoot, wxT("DataGeneric/Nested"));
+    const wxString sBurnFolder = JoinPath(JoinPath(m_sRoot, wxT("DataGeneric")), wxT("Nested"));
     const wxString sConfigFolder = JoinPath(m_sFolder, wxT("Nested"));
     ASSERT_TRUE(wxFileName::Mkdir(sBurnFolder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL));
     ASSERT_TRUE(wxFileName::Mkdir(sConfigFolder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL));
