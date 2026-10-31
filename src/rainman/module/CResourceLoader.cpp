@@ -35,9 +35,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <memory>
 #include <string>
 #include <vector>
-#ifndef RAINMAN_GNUC
-#include <direct.h>
-#endif
 
 static void NormalizeNativePath(std::string &sPath)
 {
@@ -48,23 +45,16 @@ static void NormalizeNativePath(std::string &sPath)
 #endif
 }
 
-static int MakeDirectory(const char *sPath)
+static void MakeDirectory(const char *sPath)
 {
-#ifdef RAINMAN_GNUC
     std::string sNativePath = sPath;
     NormalizeNativePath(sNativePath);
     std::error_code ec;
     std::filesystem::create_directories(sNativePath, ec);
     if (ec)
     {
-        const std::string sErrorMessage =
-            "Could not create directory '" + sNativePath + "': " + ec.message();
-        throw CRainmanException(__FILE__, __LINE__, sErrorMessage.c_str());
+        RAINMAN_LOG_WARN("Could not create directory '{}': {}", sNativePath, ec.message());
     }
-    return 0;
-#else
-    return _mkdir(sPath);
-#endif
 }
 
 // -- Parallel archive preloading infrastructure (Phase J) --
